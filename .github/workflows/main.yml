@@ -13,8 +13,17 @@ jobs:
       
       - name: Set app icon
         run: |
-          sed -i '/^icon.filename[[:space:]]*=/d' buildozer.spec
-          sed -i '/^\[app\]/a icon.filename = %(source.dir)s/icon.png' buildozer.spec
+          if [ ! -f icon.png ]; then
+            echo "icon.png missing"
+            exit 1
+          fi
+          if [ ! -f buildozer.spec ]; then
+            echo "buildozer.spec missing"
+            exit 1
+          fi
+          grep -q '^\[app\]' buildozer.spec || exit 1
+          sed -i '/^[[:space:]]*icon.filename[[:space:]]*=/d' buildozer.spec
+          sed -i '/^\[app\]/a icon.filename = %(source.dir)s/icon.png' buildozer.speczer.spec
           
       - name: Build APK
         uses: ArtemSBulgakov/buildozer-action@v1
