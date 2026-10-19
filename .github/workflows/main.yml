@@ -10,7 +10,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+      
+      - name: Set app icon
+        run: |
+          sed -i '/^icon.filename[[:space:]]*=/d' buildozer.spec
+          sed -i '/^\[app\]/a icon.filename = %(source.dir)s/icon.png' buildozer.spec
+          
       - name: Build APK
         uses: ArtemSBulgakov/buildozer-action@v1
         id: buildozer
