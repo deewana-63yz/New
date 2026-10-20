@@ -73,17 +73,14 @@ jobs:
           }
           EOF
 
-          # Assets folder banakar icon copy karein
           mkdir -p assets
           cp logo.png assets/icon.png
+          cp logo.png assets/icon-only.png || true
+          cp logo.png assets/icon-foreground.png || true
+          cp logo.png assets/icon-background.png || true
 
-          # Step 1: Pehle Android folder add karein
           npx cap add android
-
-          # Step 2: Android folder banne KE BAAD assets generate karein
           npx capacitor-assets generate --android --asset-path assets
-
-          # Step 3: Final Sync karein taaki naye icons apply ho jayein
           npx cap sync android
 
       - name: Build APK
