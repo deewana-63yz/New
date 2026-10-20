@@ -74,11 +74,11 @@ steps:
       EOF
 
       mkdir -p assets
-      cp logo.png assets/icon.png
+      cp logo.png assets/logo.png
 
       npx cap add android
       npx cap sync android
-      npx capacitor-assets generate --android
+      npx @capacitor/assets generate --android
 
   - name: Build APK
     run: |
