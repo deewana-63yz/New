@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Smooth Skeleton Reptile</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #050414; }
+  body { touch-action: none; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="scene" aria-label="Touch the screen to move the glowing skeletal reptile"></canvas>
+<script>
+"use strict";
+
+const canvas = document.getElementById("scene");
+const ctx = canvas.getContext("2d", { alpha: false });
+const TAU = Math.PI * 2;
+const NIGHT_TOP = [5, 4, 20];
+const NIGHT_MID = [7, 3, 34];
+const NIGHT_BOTTOM = [17, 8, 60];
+const WHITE = "rgba(255,255,255,1)";
+const CREATURE_HALO = "rgba(170,180,255,0.62)";
+let WIDTH = 0, HEIGHT = 0, mouseX = 0, mouseY = 0, background = null;
+let creature = null;
+
+function wrapAngle(a) { return a - 2 * Math.PI * Math.floor(a / (2 * Math.PI) + 0.5); }
+function distance(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+function lerpAngle(current, target, amount) { return current + wrapAngle(target - current) * amount; }
+
+function makeNightBackground(width, height) {
+  const bw = 240, bh = 320;
+  const off = document.createElement("canvas");
+  off.width = bw; off.height = bh;
+  const bctx = off.getContext("2d");
+  const image = bctx.createImageData(bw, bh);
+  const cx = bw * 0.48, cy = bh * 0.80, glowR = bw * 0.95;
+  for (let y = 0; y < bh; y++) {
+    const t = y / (bh - 1);
+    let base;
+    if (t < 0.62) {
+      const q = t / 0.62;
+      base = NIGHT_TOP.map((v, i) => Math.trunc(v * (1 - q) + NIGHT_MID[i] * q));
+    } else {
+      const q = (t - 0.62) / 0.38;
+      base = NIGHT_MID.map((v, i) => Math.trunc(v * (1 - q) + NIGHT_BOTTOM[i] * q));
+    }
+    for (let x = 0; x < bw; x++) {
+      const dx = (x - cx) / glowR;
+      const dy = (y - cy) / (bh * 0.78);
+      let glow = Math.max(0, 1 - dx * dx - dy * dy);
+      glow = glow * glow * 0.78;
+      const r = Math.min(255, Math.trunc(base[0] + 54 * glow));
+      const g = Math.min(255, Math.trunc(base[1] + 43 * glow));
+      const b = Math.min(255, Math.trunc(base[2] + 115 * glow));
+      const vx = (x - bw * 0.5) / (bw * 0.72);
+      const vy = (y - bh * 0.52) / (bh * 0.82);
+      const vignette = Math.max(0, vx * vx + vy * vy - 0.28) * 0.20;
+      const factor = Math.max(0.56, 1 - vignette);
+      const k = (y * bw + x) * 4;
+      image.data[k] = Math.trunc(r * factor);
+      image.data[k + 1] = Math.trunc(g * factor);
+      image.data[k + 2] = Math.trunc(b * factor);
+      image.data[k + 3] = 255;
+    }
+  }
+  bctx.putImageData(image, 0, 0);
+  const scaled = document.createElement("canvas");
+  scaled.width = Math.max(1, Math.round(width));
+  scaled.height = Math.max(1, Math.round(height));
+  const sctx = scaled.getContext("2d");
+  sctx.imageSmoothingEnabled = true;
+  sctx.imageSmoothingQuality = "high";
+  sctx.drawImage(off, 0, 0, scaled.width, scaled.height);
+  return scaled;
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  WIDTH = Math.max(1, window.innerWidth);
+  HEIGHT = Math.max(1, window.innerHeight);
+  canvas.width = Math.round(WIDTH * dpr);
+  canvas.height = Math.round(HEIGHT * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  background = makeNightBackground(WIDTH, HEIGHT);
+  if (mouseX === 0 && mouseY === 0) {
+    mouseX = WIDTH * 0.85;
+    mouseY = HEIGHT * 0.80;
+  }
+}
+
+class Segment {
+  constructor(parent, size, relAngle, angleRange, stiffness) {
+    this.parent = parent;
+    this.children = [];
+    this.size = Number(size);
+    this.relAngle = Number(relAngle);
+    this.defAngle = Number(relAngle);
+    this.range = Number(angleRange);
+    this.stiffness = Number(stiffness);
+    parent.children.push(this);
+    this.absAngle = parent.absAngle + this.relAngle;
+    this.x = parent.x + Math.cos(this.absAngle) * this.size;
+    this.y = parent.y + Math.sin(this.absAngle) * this.size;
+  }
+  updateRelative(recursive = false, flex = true) {
+    this.relAngle = wrapAngle(this.relAngle);
+    if (flex) {
+      const lo = this.defAngle - this.range / 2;
+      const hi = this.defAngle + this.range / 2;
+      const value = (this.relAngle - this.defAngle) / this.stiffness + this.defAngle;
+      this.relAngle = Math.max(lo, Math.min(hi, value));
+    }
+    this.absAngle = this.parent.absAngle + this.relAngle;
+    this.x = this.parent.x + Math.cos(this.absAngle) * this.size;
+    this.y = this.parent.y + Math.sin(this.absAngle) * this.size;
+    if (recursive) for (const child of this.children) child.updateRelative(true, flex);
+  }
+  follow(recursive = true) {
+    const dx = this.x - this.parent.x, dy = this.y - this.parent.y;
+    const d = Math.hypot(dx, dy);
+    const targetAbs = d < 0.000001 ? this.parent.absAngle : Math.atan2(dy, dx);
+    let desiredRel = wrapAngle(targetAbs - this.parent.absAngle);
+    desiredRel = Math.max(this.defAngle - this.range / 2, Math.min(this.defAngle + this.range / 2, desiredRel));
+    const blend = Math.max(0.10, Math.min(0.52, 0.85 / this.stiffness));
+    this.relAngle = lerpAngle(this.relAngle, desiredRel, blend);
+    this.updateRelative(false, false);
+    if (recursive) for (const child of this.children) child.follow(true);
+  }
+  // Add bones to shared paths. Batching strokes removes thousands of canvas
+  // draw calls per frame without changing the skeleton geometry or its motion.
+  addPaths(haloPath, corePath) {
+    haloPath.moveTo(this.parent.x, this.parent.y);
+    haloPath.lineTo(this.x, this.y);
+    corePath.moveTo(this.parent.x, this.parent.y);
+    corePath.lineTo(this.x, this.y);
+    for (const child of this.children) child.addPaths(haloPath, corePath);
+  }
+}
+
+class LimbSystem {
+  constructor(end, length, speed, creature) {
+    this.end = end;
+    this.length = Math.max(1, Math.trunc(length));
+    this.speed = Number(speed);
+    this.creature = creature;
+    creature.systems.push(this);
+    this.nodes = [];
+    let node = end;
+    for (let i = 0; i < this.length; i++) {
+      this.nodes.unshift(node);
+      node = node.parent;
+      if (!(node instanceof Segment)) { this.length = this.nodes.length; break; }
+    }
+    this.hip = this.nodes[0].parent;
+  }
+  moveTo(x, y) {
+    this.nodes[0].updateRelative(true, true);
+    const d = distance(x, y, this.end.x, this.end.y);
+    let remaining = Math.max(0, d - this.speed);
+    for (const node of [...this.nodes].reverse()) {
+      const ang = Math.atan2(node.y - y, node.x - x);
+      node.x = x + remaining * Math.cos(ang);
+      node.y = y + remaining * Math.sin(ang);
+      x = node.x; y = node.y; remaining = node.size;
+    }
+    for (const node of this.nodes) {
+      node.absAngle = Math.atan2(node.y - node.parent.y, node.x - node.parent.x);
+      node.relAngle = wrapAngle(node.absAngle - node.parent.absAngle);
+      for (const child of node.children) {
+        if (!this.nodes.includes(child)) child.updateRelative(true, false);
+      }
+    }
+  }
+  update() { this.moveTo(this.creature.x, this.creature.y); }
+}
+
+class LegSystem extends LimbSystem {
+  constructor(end, length, speed, creature, dist = 4, gaitGroup = 0, lateral = 0, phaseOffset = 0) {
+    super(end, length, speed, creature);
+    this.goalX = end.x; this.goalY = end.y; this.step = 0;
+    this.forwardness = 0; this.gaitGroup = gaitGroup; this.lateral = lateral;
+    this.phaseOffset = phaseOffset; this.stepProgress = 0;
+    this.startX = this.goalX; this.startY = this.goalY;
+    this.reach = 0.9 * distance(this.end.x, this.end.y, this.hip.x, this.hip.y);
+    let rel = this.creature.absAngle - Math.atan2(this.end.y - this.hip.y, this.end.x - this.hip.x);
+    rel = wrapAngle(rel);
+    this.swing = -rel + (2 * (rel < 0 ? 1 : 0) - 1) * Math.PI / 2;
+    this.swingOffset = this.creature.absAngle - this.hip.absAngle;
+  }
+  plantTarget() {
+    const forward = this.creature.absAngle;
+    const sideAng = forward + Math.PI / 2;
+    const stride = Math.min(this.reach * 0.34, Math.max(this.reach * 0.18, this.creature.speed * 4));
+    const phase = this.creature.walkPhase + this.phaseOffset;
+    const forwardOffset = Math.sin(phase) * stride;
+    const baseAng = this.hip.absAngle + this.swing + this.swingOffset;
+    const baseX = this.hip.x + this.reach * 0.78 * Math.cos(baseAng);
+    const baseY = this.hip.y + this.reach * 0.78 * Math.sin(baseAng);
+    return [baseX + Math.cos(forward) * forwardOffset + this.lateral * Math.cos(sideAng),
+            baseY + Math.sin(forward) * forwardOffset + this.lateral * Math.sin(sideAng)];
+  }
+  update() {
+    if (this.step === 0) {
+      this.moveTo(this.goalX, this.goalY);
+      const d = distance(this.end.x, this.end.y, this.goalX, this.goalY);
+      const canStep = this.creature.gaitGroup === this.gaitGroup;
+      if (canStep && d > Math.max(3, this.reach * 0.17) && this.creature.speed > 0.28) {
+        this.step = 1; this.stepProgress = 0;
+        this.startX = this.end.x; this.startY = this.end.y;
+        [this.goalX, this.goalY] = this.plantTarget();
+      }
+    } else {
+      const stepRate = Math.max(0.075, Math.min(0.22, this.speed / Math.max(1, this.reach) * 1.45));
+      this.stepProgress = Math.min(1, this.stepProgress + stepRate);
+      const t = this.stepProgress;
+      const eased = t * t * (3 - 2 * t);
+      let xNow = this.startX + (this.goalX - this.startX) * eased;
+      let yNow = this.startY + (this.goalY - this.startY) * eased;
+      const lift = Math.sin(t * Math.PI) * this.reach * 0.11;
+      xNow -= Math.sin(this.creature.absAngle) * lift;
+      yNow += Math.cos(this.creature.absAngle) * lift;
+      this.moveTo(xNow, yNow);
+      if (this.stepProgress >= 1) {
+        this.step = 0; this.goalX = this.end.x; this.goalY = this.end.y;
+      }
+    }
+  }
+}
+
+class Creature {
+  constructor(x, y, angle, fAccel, fFric, fRes, fThresh, rAccel, rFric, rRes, rThresh) {
+    this.x = Number(x); this.y = Number(y); this.absAngle = Number(angle);
+    this.fSpeed = 0; this.fAccel = Number(fAccel); this.fFric = Number(fFric);
+    this.fRes = Number(fRes); this.fThresh = Number(fThresh);
+    this.rSpeed = 0; this.rAccel = Number(rAccel); this.rFric = Number(rFric);
+    this.rRes = Number(rRes); this.rThresh = Number(rThresh);
+    this.children = []; this.systems = []; this.speed = 0;
+    this.gaitDistance = 0; this.gaitGroup = 0; this.walkPhase = 0;
+  }
+  follow(x, y) {
+    const d = distance(this.x, this.y, x, y);
+    const targetAngle = Math.atan2(y - this.y, x - this.x);
+    const maxSpeed = this.fAccel;
+    let desiredSpeed = Math.min(maxSpeed, Math.max(0, d - this.fThresh) * 0.14);
+    if (this.systems.length) {
+      const standing = this.systems.reduce((n, system) => n + (system.step === 0 ? 1 : 0), 0);
+      desiredSpeed *= 0.88 + 0.12 * (standing / this.systems.length);
+    }
+    this.fSpeed += (desiredSpeed - this.fSpeed) * 0.20;
+    this.fSpeed *= (1 - this.fRes);
+    this.speed = Math.max(0, this.fSpeed - this.fFric);
+    if (this.speed > 0.20) {
+      this.gaitDistance += this.speed;
+      this.walkPhase = (this.walkPhase + this.speed * 0.075) % TAU;
+      if (this.gaitDistance >= 10.5) {
+        this.gaitDistance -= 10.5;
+        this.gaitGroup = (this.gaitGroup + 1) % 4;
+      }
+    }
+    const dif = wrapAngle(targetAngle - this.absAngle);
+    let targetTurn = 0;
+    if (d > this.fThresh) targetTurn = Math.max(-this.rAccel, Math.min(this.rAccel, dif * 0.20));
+    this.rSpeed += (targetTurn - this.rSpeed) * 0.17;
+    this.rSpeed *= (1 - this.rRes);
+    if (Math.abs(this.rSpeed) < this.rFric) this.rSpeed = 0;
+    this.absAngle = wrapAngle(this.absAngle + this.rSpeed);
+    this.x += this.speed * Math.cos(this.absAngle);
+    this.y += this.speed * Math.sin(this.absAngle);
+    this.absAngle += Math.PI;
+    for (const child of this.children) child.follow(true);
+    for (const system of this.systems) system.update(x, y);
+    this.absAngle -= Math.PI;
+    this.draw();
+  }
+  draw() {
+    const haloPath = new Path2D();
+    const corePath = new Path2D();
+    const r = 5;
+    const a1 = Math.PI / 4 + this.absAngle;
+    const a2 = 7 * Math.PI / 4 + this.absAngle;
+    const p0x = this.x + r * Math.cos(a1), p0y = this.y + r * Math.sin(a1);
+    const p1x = this.x + r * Math.sqrt(2) * Math.cos(this.absAngle);
+    const p1y = this.y + r * Math.sqrt(2) * Math.sin(this.absAngle);
+    const p2x = this.x + r * Math.cos(a2), p2y = this.y + r * Math.sin(a2);
+    haloPath.moveTo(p0x, p0y); haloPath.lineTo(p1x, p1y); haloPath.lineTo(p2x, p2y);
+    corePath.moveTo(p0x, p0y); corePath.lineTo(p1x, p1y); corePath.lineTo(p2x, p2y);
+    for (const child of this.children) child.addPaths(haloPath, corePath);
+
+    // Soft blue-white halo plus a fine, bright white core.
+    // The shared paths keep rendering batched for smoother animation.
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(170,180,255,0.18)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke(haloPath);
+    ctx.strokeStyle = CREATURE_HALO;
+    ctx.lineWidth = 0.85;
+    ctx.stroke(haloPath);
+    ctx.strokeStyle = WHITE;
+    ctx.lineWidth = 0.5;
+    ctx.stroke(corePath);
+  }
+}
+
+function buildLizard(size, legs, tail) {
+  const s = Number(size);
+  const movementScale = 11.0 / Math.sqrt(12);
+  const lizard = new Creature(WIDTH / 2, HEIGHT / 2, 0,
+    movementScale * 7.4, movementScale * 0.18, 0.16, 12,
+    0.24, 0.010, 0.18, 0.12);
+  let spinal = lizard;
+
+  // Neck
+  for (let i = 0; i < 6; i++) {
+    spinal = new Segment(spinal, s * 4, 0, Math.PI * 2 / 3, 1.7);
+    for (const side of [-1, 1]) {
+      let node = new Segment(spinal, s * 3, side, 0.08, 2.8);
+      for (let j = 0; j < 3; j++) node = new Segment(node, s * 0.10, -side * 0.10, 0.08, 3.0);
+    }
+  }
+
+  // Body and legs
+  for (let legIndex = 0; legIndex < legs; legIndex++) {
+    if (legIndex > 0) {
+      for (let j = 0; j < 6; j++) {
+        spinal = new Segment(spinal, s * 4, 0, 1.571, 1.8);
+        for (const side of [-1, 1]) {
+          let node = new Segment(spinal, s * 3, side * 1.571, 0.08, 2.6);
+          for (let k = 0; k < 3; k++) node = new Segment(node, s * 3, -side * 0.25, 0.08, 2.8);
+        }
+      }
+    }
+    for (const side of [-1, 1]) {
+      let node = new Segment(spinal, s * 12, side * 0.785, 0, 8);
+      node = new Segment(node, s * 16, -side * 0.785, 5.3, 1.3);
+      node = new Segment(node, s * 16, side * 1.571, Math.PI, 2.2);
+      for (let toe = 0; toe < 4; toe++) new Segment(node, s * 4, (toe / 3 - 0.5) * 0.95, 0.07, 4.5);
+      const group = (legIndex * 2 + (side > 0 ? 1 : 0)) % 4;
+      new LegSystem(node, 3, s * 9.0, lizard, 4, group,
+        side * s * 2.0, (legIndex * 2 + (side > 0 ? 1 : 0)) * Math.PI / 2);
+    }
+  }
+
+  // Long, calmer tail
+  for (let i = 0; i < tail; i++) {
+    spinal = new Segment(spinal, s * 4, 0, 0.62, 2.0);
+    for (const side of [-1, 1]) {
+      let node = new Segment(spinal, s * 3, side, 0.055, 3.2);
+      const tailScale = (tail - i) / tail;
+      for (let j = 0; j < 3; j++) node = new Segment(node, s * 3 * tailScale, -side * 0.08, 0.055, 3.4);
+    }
+  }
+  return lizard;
+}
+
+function pointerPosition(event) {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = event.clientX - rect.left;
+  mouseY = event.clientY - rect.top;
+}
+canvas.addEventListener("pointerdown", event => { pointerPosition(event); canvas.setPointerCapture?.(event.pointerId); });
+canvas.addEventListener("pointermove", pointerPosition);
+window.addEventListener("resize", () => {
+  resize();
+  // Keep the existing body and its movement state when the screen changes size.
+});
+
+resize();
+const LEG_COUNT = 12;
+const TAIL_COUNT = 48;
+const CREATURE_SIZE_FACTOR = 0.43; // Smaller creature, leaving more background visible.
+const SCALE = (11.0 / Math.sqrt(LEG_COUNT)) * CREATURE_SIZE_FACTOR;
+creature = buildLizard(SCALE, LEG_COUNT, TAIL_COUNT);
+
+function frame() {
+  ctx.drawImage(background, 0, 0, WIDTH, HEIGHT);
+  creature.follow(mouseX, mouseY);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+
+<!-- Added: online update checker.
+     Works when this HTML is hosted at an HTTP/HTTPS URL.
+     It cannot silently update an installed APK's packaged files. -->
+<script id="online-update-checker">
+(() => {
+  "use strict";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+
+  const CHECK_EVERY_MS = 60000;
+  let checking = false;
+
+  async function checkForOnlineChanges() {
+    if (checking || document.visibilityState === "hidden") return;
+    checking = true;
+    try {
+      const checkUrl = new URL(location.href);
+      checkUrl.searchParams.set("__online_update_check", String(Date.now()));
+      const response = await fetch(checkUrl.href, {
+        cache: "no-store",
+        credentials: "same-origin"
+      });
+      if (!response.ok) return;
+
+      const latestHtml = await response.text();
+      const normalize = (value) => value
+        .replace(/<!doctype[^>]*>/i, "")
+        .replace(/<script id=["']online-update-checker["'][\s\S]*?<\/script>/i, "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (normalize(latestHtml) !== normalize(document.documentElement.outerHTML)) {
+        if (window.confirm("A newer online version may be available. Reload now to update?")) {
+          location.reload();
+        }
+      }
+    } catch (_) {
+      // Keep the app running if offline or if the host blocks update checks.
+    } finally {
+      checking = false;
+    }
+  }
+
+  window.setInterval(checkForOnlineChanges, CHECK_EVERY_MS);
+  window.addEventListener("focus", checkForOnlineChanges);
+})();
+</script>
+
+</body>
+</html>
