@@ -47,41 +47,12 @@ jobs:
             HTML_FILE="${FILES[0]}"
           fi
 
-          mkdir -p www
-          rsync -a \
-            --exclude='.git/' \
-            --exclude='.github/' \
-            --exclude='www/' \
-            --exclude='android/' \
-            --exclude='node_modules/' \
-            --exclude='package.json' \
-            --exclude='package-lock.json' \
-            --exclude='capacitor.config.json' \
-            ./ www/
-
-          cp "$HTML_FILE" www/index.html
-
-          npm init -y
-          npm install @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
-          npm install --save-dev @capacitor/assets
-
-          cat > capacitor.config.json <<'EOF'
-          {
-            "appId": "com.interexive.easy",
-            "appName": "Interexive - Easy",
-            "webDir": "www"
-          }
-          EOF
-
           mkdir -p assets
-          cp logo.png assets/icon.png
-          cp logo.png assets/icon-only.png || true
-          cp logo.png assets/icon-foreground.png || true
-          cp logo.png assets/icon-background.png || true
+cp logo.png assets/logo.png
 
-          npx cap add android
-          npx capacitor-assets generate --android --asset-path assets
-          npx cap sync android
+npx cap add android
+npx @capacitor/assets generate --android
+npx cap sync android
 
       - name: Build APK
         run: |
